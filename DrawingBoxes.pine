@@ -1,0 +1,351 @@
+//@version=6
+indicator("DrawingBoxes", overlay = true, max_boxes_count = 500)
+
+// TODO
+// - [x] tf sliding window
+// - [ ] ticks handling?
+// - [ ] merging labels
+// - [ ] merging boxes
+// - [x] merging requested data
+// - [ ] code style mess
+
+var bool debug_mode = input.bool(false, "Debug Mode")
+var string[] userTimeframes = str.split(str.upper(input.text_area("1\n2\n3\n5\n10\n15\n30\n96\n144\n288\n1h\n2h\n4h\n6h\n8h\n12h\n23h\n1d\n2d\n3d\n4d\n5d\n6d\n8d\n9d\n10d\n11d\n12d\n13d\n1w\n2w\n3w\n4w\n1m\n2m\n3m\n6m\n12m", "Timeframes", "Any number of timeframes.\nNew timeframe in new line.\nDuplicate entries are ignored.\nInvalid timeframes are ignored.\n\nFormat:\n  x => x minutes\n  xh => x hours\n  xd => x days\n  xm => x months", "Group")), "\n")
+var bool showLabels = input.bool(true, "Show labels")
+var int limitTfs = input.int(10, "Max number of extra TFs", minval=0, maxval=40, step=1, tooltip = "How many extra timeframes should be analyzed besides current one?")
+var bool use3BarsFVGOnly = input.bool(true, "Use only 3 bars FVGs")
+var int hiddenDepth = input.int(0, "Hidden depth", minval=0, maxval=20, step=1, tooltip = "Minimum number of FVG in front of the block")
+var float limit = input.float(50.0, "Mitigation limit [%]", minval = 0.01, maxval = 99.99, step=0.01, tooltip = "Blocks mitigated over this limit are eliminated")
+var int maxBoxesPerTf = input.int(100, "Max number of boxes per TF", minval=10, maxval=1000, tooltip = "Performance dial")
+var color block_color = input.color(color.rgb(1, 95, 202, 80), "Block color")
+var color block_border = input.color(color.rgb(118, 116, 116, 100), "Block border color")
+
+var int leftLimit = na
+
+type Block
+    int left
+    float top
+    int right
+    float bottom
+    float draw_top
+    float draw_bottom
+    float overlap = 0
+    int fvgs = 0
+    bool skipped = false
+    box box = na
+
+type TFData
+    int tf_in_seconds
+    string tf_string
+    string tf_label
+    bool is_current
+    int last_time
+    Block[] blocks
+    Block[] mitigated
+    int counts
+
+var TFData[] validTimeframes = array.new<TFData>()
+var int chartTfInSeconds = timeframe.in_seconds()
+var int tfIdxLowerBound = na
+var int tfIdxUpperBound = na
+
+initTFData(int tf_in_seconds, string tf_string, string tf_label, bool is_current = false) => 
+    TFData.new(
+        tf_in_seconds = tf_in_seconds,
+        tf_string = tf_string,
+        tf_label = tf_label,
+        is_current = is_current,
+        blocks = array.new<Block>(),
+        mitigated = array.new<Block>()
+    )
+
+canUseTF(int tf_in_seconds) =>
+    bool result = true
+    if tf_in_seconds < chartTfInSeconds and chartTfInSeconds/tf_in_seconds > 60
+        result := false
+    result
+
+merge_data(TFData data, Block[] new_blocks) =>
+    int i = 0
+    int j = 0
+    blocksCount = data.blocks.size()
+    newBlocksCount = new_blocks.size()
+
+    while i < blocksCount and j < newBlocksCount
+        block = data.blocks.get(i)
+        new_block = new_blocks.get(j)
+
+        if block.left == new_block.left
+            i += 1
+            j += 1
+        else if block.left < new_block.left
+            block.overlap := 100
+            i += 1
+        else
+            data.blocks.push(new_block.copy())
+            j += 1
+
+    while i < data.blocks.size()
+        block = data.blocks.get(i)
+        block.overlap := 100
+        i += 1
+
+    while j < new_blocks.size()
+        new_block = new_blocks.get(j)
+        data.blocks.push(new_block.copy())
+        j += 1
+
+    data.blocks.sort(order.ascending, "left")
+    if data.blocks.size() > 0
+        for k = data.blocks.size() - 1 to 0
+            block = data.blocks.get(k)
+            if block.overlap > limit
+                data.blocks.remove(k)
+                if not na(block.box)
+                    data.mitigated.push(block)
+
+logic_inner(Block[] blocks, Block[] mitigated) =>
+    bool fvgBull = low > high[2]
+    bool fvgBear = high < low[2]
+    float top1 = math.max(open[1], close[1])
+    float top0 = math.max(open[0], close[0])
+    float bottom1 = math.min(open[1], close[1])
+    float bottom0 = math.min(open[0], close[0])
+
+    float fvgTop = fvgBull ? low : fvgBear ? low[2] : na
+    float fvgBottom = fvgBull ? high[2] : fvgBear ? high : na
+
+    blocksCount = blocks.size()
+    if blocksCount > 0
+        for i = blocksCount - 1 to 0
+            Block block = blocks.get(i)
+            if block.overlap > limit
+                mitigated.push(block)
+                blocks.remove(i)
+                continue
+            
+            if block.bottom < high and low < block.top
+                float blockRange = block.draw_top - block.draw_bottom
+                
+                if block.skipped
+                    block.skipped := false
+                    if use3BarsFVGOnly
+                        if (fvgBear or fvgBull)
+                            fvgOverlap = math.max(0, math.min(block.draw_top, fvgTop) - math.max(block.draw_bottom, fvgBottom)) / blockRange
+                            if fvgOverlap < 0.5
+                                mitigated.push(block)
+                                blocks.remove(i)
+                                continue
+                        else
+                            mitigated.push(block)
+                            blocks.remove(i)
+                            continue
+                
+                float overlap = math.max(0, math.min(block.draw_top, high)-math.max(block.draw_bottom, low)) / blockRange
+                if overlap == 1
+                    float body_overlap = math.max(0, math.min(block.draw_top, top0)-math.max(block.draw_bottom, bottom0)) / blockRange
+                    if body_overlap > 0.8
+                        block.skipped := true
+                        block.fvgs +=1
+                        continue
+
+                if overlap > 0
+                    if block.draw_top <= high
+                        block.draw_top := low
+                    
+                    if low <= block.draw_bottom
+                        block.draw_bottom := high
+
+                    block.overlap := ((1-((block.draw_top - block.draw_bottom) / (block.top-block.bottom))) * 100)
+                
+            else
+                block.skipped := false
+
+    if (open[1] != close[1] and open[0] != close[0]) and ((open[0] < close[0]) != (open[1] < close[1]))
+        float top = math.min(top1, top0)
+        float bottom = math.max(bottom1, bottom0)
+
+        if blocks.size() > 0
+            Block prev_block = blocks.last()
+            if prev_block.left == time[2]
+                float overlap = math.max(0, math.min(prev_block.draw_top, top)-math.max(prev_block.draw_bottom, bottom)) / (prev_block.draw_top - prev_block.draw_bottom)
+                // if previous block overlaps with the new one - remove previous one
+                if overlap > 0.8    
+                    mitigated.push(blocks.pop())
+
+        blocks.push(Block.new(
+            left = time[1],
+            top = top,
+            right = timenow + timeframe.in_seconds(),
+            bottom = bottom,
+            draw_top = top,
+            draw_bottom = bottom,
+            overlap = 0,
+            fvgs = 0,
+            box = na
+        ))
+
+        if blocks.size() > maxBoxesPerTf
+            oldest = blocks.shift()
+            if not na(oldest.box)
+                mitigated.push(oldest)
+
+request_expr() =>
+    tf_in_seconds = timeframe.in_seconds()
+
+    var data = initTFData(
+        tf_in_seconds = tf_in_seconds,
+        tf_string = timeframe.period,
+        tf_label = str.format("Custom-{0}", tf_in_seconds),
+        is_current = false
+    )
+
+    logic_inner(data.blocks, data.mitigated)
+    data.mitigated.clear()
+
+    
+    if barstate.islastconfirmedhistory or barstate.islast
+        data
+    else 
+        na
+    
+var int current_pos = -1
+if barstate.isfirst
+    leftLimit := time[0]
+    map<string, bool> unique_timeframes = map.new<string, bool>()
+
+    string chart_tf_label = switch
+        (3600 <= chartTfInSeconds 
+            and chartTfInSeconds <= 82800 
+            and chartTfInSeconds % 3600 == 0) => str.format("{0}H", chartTfInSeconds / 3600)
+        => timeframe.period
+    
+    unique_timeframes.put(chart_tf_label, true)
+    validTimeframes.push(initTFData(
+        tf_in_seconds = chartTfInSeconds,
+        tf_string = timeframe.period,
+        tf_label = chart_tf_label,
+        is_current = true
+    ))
+    
+    for user_tf in userTimeframes
+        string tf = str.trim(user_tf)
+        if unique_timeframes.contains(tf)
+            continue // ignore duplicate entries
+
+        string matched_tf = str.match(tf, "^((\\d+[SHDWM])|(\\d+))$")
+        if matched_tf != ""
+            if str.match(tf, "^\\d+H$") != ""
+                h = str.tonumber(str.split(tf, "H").first())
+                if h > 23 
+                    continue // early exit
+                // 1h -> 60, 2h -> 120, 3h -> 180 etc.
+                matched_tf := str.tostring(h*60)
+
+            int tf_in_seconds = timeframe.in_seconds(matched_tf)
+            unique_timeframes.put(tf, true)
+            validTimeframes.push(initTFData(
+                tf_in_seconds = tf_in_seconds,
+                tf_string = matched_tf,
+                tf_label = tf,
+                is_current = false    
+            ))
+        else
+            log.error("Invalid timeframe: {0}", tf)
+
+    // sort all timeframes
+    validTimeframes.sort(order.ascending, "tf_in_seconds")
+    
+    message = ""
+    for [i,data] in validTimeframes
+        message += str.format(" - [{0}] {1}{2}: {3}\n", data.tf_string, data.tf_label, data.is_current ? "*" : "", data.tf_in_seconds)
+        if data.is_current
+            current_pos := i
+
+    log.info("\nInitialized TFS:\n{0}", message)
+    validTimeframesCount = validTimeframes.size() -1
+    tfIdxLowerBound := math.max(0, math.min(current_pos - int(limitTfs/2), validTimeframesCount - limitTfs))
+    tfIdxUpperBound := math.min(tfIdxLowerBound + limitTfs, validTimeframesCount)
+
+    log.info("Window: {0} - {1}", tfIdxLowerBound, tfIdxUpperBound)
+
+    message := ""
+    for i = tfIdxLowerBound to tfIdxUpperBound
+        data = validTimeframes.get(i)
+        message += str.format("{0}) [{1}] {2}{3}: {4} ({5})\n", i, data.tf_string, data.tf_label, data.is_current ? "*" : "", data.tf_in_seconds, canUseTF(data.tf_in_seconds))
+        if not canUseTF(data.tf_in_seconds)
+            tfIdxLowerBound := math.min(tfIdxLowerBound +1, current_pos)
+            tfIdxUpperBound := math.min(tfIdxUpperBound +1, validTimeframesCount)
+
+    
+    log.info("\nPotential TFS:\n{0}", message)
+    log.info("Window: {0} - {1}", tfIdxLowerBound, tfIdxUpperBound)
+
+for tfIdx = tfIdxLowerBound to tfIdxUpperBound
+    TFData data = validTimeframes.get(tfIdx)
+    if data.tf_in_seconds != chartTfInSeconds
+        // ltf & htf
+        v = request.security(
+            symbol = syminfo.tickerid,
+            timeframe = data.tf_string,
+            expression = request_expr(),
+            gaps = barmerge.gaps_off,
+            lookahead = barmerge.lookahead_off,
+            ignore_invalid_symbol = true
+        )
+        if not na(v)
+            merge_data(data, v.blocks)
+            
+    else
+        logic_inner(data.blocks, data.mitigated)
+
+    // remove mitigated
+    for block in data.mitigated
+        block.box.delete()        
+    data.mitigated.clear()
+    
+
+
+if barstate.islast
+    count = 0
+    msg = ""
+    for tfIdx = tfIdxLowerBound to tfIdxUpperBound
+        TFData data = validTimeframes.get(tfIdx)
+        msg += str.format("\n[{0}{1}] {2}", data.tf_label, data.is_current ? "*":"", data.blocks.size())
+        count += data.blocks.size()
+
+        for [i, b] in data.blocks  
+            boxColor = b.skipped ? color.rgb(255, 170, 0, 90) : block_color
+            labelText = showLabels ? str.format("[{0} x{1}] {2,number}", data.tf_label, b.fvgs, b.overlap) : ""
+            if na(b.box)
+                if hiddenDepth <= b.fvgs
+                    boxId = box.new(
+                        left = b.left,
+                        top = b.draw_top,
+                        right = b.right,
+                        bottom = b.draw_bottom,
+                        xloc = xloc.bar_time,
+                        border_color = block_border,
+                        border_width  = 1,
+                        bgcolor = boxColor,
+                        text = labelText,
+                        text_color = color.white,
+                        text_size  = size.tiny,
+                        text_valign = text.align_top,
+                        text_halign = text.align_right
+                    )
+                    b.box := boxId
+            else
+                b.box.set_top(b.draw_top)
+                b.box.set_bottom(b.draw_bottom)
+                b.box.set_right(b.right)
+                b.box.set_text(labelText)
+                b.box.set_bgcolor(boxColor)
+
+    if debug_mode
+        var table displayTable = table.new(position.bottom_right, 1, 1, color.rgb(155, 39, 176, 68))
+        displayTable.cell(
+            0, 0, str.format("Boxes: {0,number,#}\nDrawn:{1}\n{2}", count, box.all.size(), msg), 
+            text_color = color.white,
+            text_halign = text.align_left
+        )
