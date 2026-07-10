@@ -1,592 +1,592 @@
 //@version=6
 indicator("DrawingBoxes", overlay = true, max_boxes_count = 500)
 
-    dbgMode = input.bool(false, "Debug", group="Dev")
+dbgMode = input.bool(false, "Debug", group="Dev")
 
-    const string DEFAULT_TIMEFRAMES = "1\n2\n3\n4\n5\n10\n15\n30\n96\n144\n288\n1h\n2h\n4h\n6h\n8h\n12h\n23h\n1d\n2d\n3d\n4d\n5d\n6d\n8d\n9d\n10d\n11d\n12d\n13d\n1w\n2w\n3w\n4w\n1m\n2m\n3m\n6m\n12m"
-    const string GROUP_TIMEFRAMES = "Timeframes"
-    timeframesInput = input.text_area(DEFAULT_TIMEFRAMES, "Timeframes", "Any number of timeframes.\nNew timeframe in new line.\nDuplicate entries are ignored.\nInvalid timeframes are ignored.\n\nFormat:\n  x => x minutes\n  xh => x hours\n  xd => x days\n  xm => x months", group = GROUP_TIMEFRAMES) 
-    limitTfs = input.int(10, "Max number of extra TFs", minval=0, maxval=40, step=1, tooltip = "How many extra timeframes should be analyzed besides current one?", group = GROUP_TIMEFRAMES)
-
-
-    // lastHTF = input.string("12h", "MTF:", tooltip = "Timeframes below this one are treated as MTF", inline = "MTF", group = GROUP_TIMEFRAMES)
-    // historyRangeMTF = input.string("12M", "History range", tooltip = "hic", inline = "MTF", group = GROUP_TIMEFRAMES)
-    // lastMTF = input.string("2h", "LTF:", tooltip = "Timeframes below this one are treated as LTF", inline="LTF", group = GROUP_TIMEFRAMES)
-    // historyRangeLTF = input.string("7d", "History range", inline = "LTF", group = GROUP_TIMEFRAMES)
-
-    use3BarsFVGOnly = input.bool(true, "Use only 3 bars FVGs")
-    mitigationLevelLimit = input.float(50.0, "Mitigation limit [%]", minval = 0.01, maxval = 99.99, step = 0.01, tooltip = "Blocks mitigated over this limit are eliminated")
-    fvgOverlapTreshold = input.float(85.0, "FVG minimal overlap treshold", minval = 0, maxval = 100, step = 0.01)
-    hiddenDepth = input.int(0, "Hidden depth", minval=0, step=1)
-    hideMitigated = input.bool(true, "Hide recently mitigated")
+const string DEFAULT_TIMEFRAMES = "1\n2\n3\n4\n5\n10\n15\n30\n96\n144\n288\n1h\n2h\n4h\n6h\n8h\n12h\n23h\n1d\n2d\n3d\n4d\n5d\n6d\n8d\n9d\n10d\n11d\n12d\n13d\n1w\n2w\n3w\n4w\n1m\n2m\n3m\n6m\n12m"
+const string GROUP_TIMEFRAMES = "Timeframes"
+timeframesInput = input.text_area(DEFAULT_TIMEFRAMES, "Timeframes", "Any number of timeframes.\nNew timeframe in new line.\nDuplicate entries are ignored.\nInvalid timeframes are ignored.\n\nFormat:\n  x => x minutes\n  xh => x hours\n  xd => x days\n  xm => x months", group = GROUP_TIMEFRAMES) 
+limitTfs = input.int(10, "Max number of extra TFs", minval=0, maxval=40, step=1, tooltip = "How many extra timeframes should be analyzed besides current one?", group = GROUP_TIMEFRAMES)
 
 
-    clusterLabels = input.bool(true, "Cluster closest labels")
-    clusterMargin = input.float(0, "Cluster Margin", minval = -5, step = 0.001) / 100
+// lastHTF = input.string("12h", "MTF:", tooltip = "Timeframes below this one are treated as MTF", inline = "MTF", group = GROUP_TIMEFRAMES)
+// historyRangeMTF = input.string("12M", "History range", tooltip = "hic", inline = "MTF", group = GROUP_TIMEFRAMES)
+// lastMTF = input.string("2h", "LTF:", tooltip = "Timeframes below this one are treated as LTF", inline="LTF", group = GROUP_TIMEFRAMES)
+// historyRangeLTF = input.string("7d", "History range", inline = "LTF", group = GROUP_TIMEFRAMES)
 
-    const string GROUP_DISPLAY = "Display"
-    blockBackground = input.color(color.rgb(35, 122, 235, 85), "Background", group = GROUP_DISPLAY, inline="colors")
-    blockBorder = input.color(color.rgb(118, 116, 116, 100), "Border", group = GROUP_DISPLAY, inline = "colors")
-    blockTextColor = input.color(color.rgb(255, 255, 255, 0), "Text", group = GROUP_DISPLAY, inline = "colors")
+use3BarsFVGOnly = input.bool(true, "Use only 3 bars FVGs")
+mitigationLevelLimit = input.float(50.0, "Mitigation limit [%]", minval = 0.01, maxval = 99.99, step = 0.01, tooltip = "Blocks mitigated over this limit are eliminated")
+fvgOverlapTreshold = input.float(85.0, "FVG minimal overlap treshold", minval = 0, maxval = 100, step = 0.01)
+hiddenDepth = input.int(0, "Hidden depth", minval=0, step=1)
+hideMitigated = input.bool(true, "Hide recently mitigated")
 
-    var MTF_TIME_LIMIT = timenow - (365 * 24 * 60 * 60 * 1000)
-    var LTF_TIME_LIMIT = timenow - (30 * 24 * 60 * 60 * 1000)
 
-    // TYPES
-    // --------
-    enum BlockState
-        New = "New"
-        Active = "Active"
-        Mitigated = "Mitigated"
-        Deleted = "Deleted"
+clusterLabels = input.bool(true, "Cluster closest labels")
+clusterMargin = input.float(0, "Cluster Margin", minval = -5, step = 0.001) / 100
 
-    type ActiveBlock
-        int left
-        float drawTop
-        float drawBottom
-        float middlePoint
-        float mitigationLevel
-        BlockState state
-        int fvgs
-        string labelText
-        box boxId
+const string GROUP_DISPLAY = "Display"
+blockBackground = input.color(color.rgb(35, 122, 235, 85), "Background", group = GROUP_DISPLAY, inline="colors")
+blockBorder = input.color(color.rgb(118, 116, 116, 100), "Border", group = GROUP_DISPLAY, inline = "colors")
+blockTextColor = input.color(color.rgb(255, 255, 255, 0), "Text", group = GROUP_DISPLAY, inline = "colors")
 
-    type Block
-        int left
-        float top
-        float bottom
-        float drawTop
-        float drawBottom
-        float mitigationLevel
-        BlockState state
-        int[] fvgs
-        bool skipped
+var MTF_TIME_LIMIT = timenow - (365 * 24 * 60 * 60 * 1000)
+var LTF_TIME_LIMIT = timenow - (30 * 24 * 60 * 60 * 1000)
 
-    type Cluster
-        float top
-        float bottom
-        ActiveBlock[] blocks
+// TYPES
+// --------
+enum BlockState
+    New = "New"
+    Active = "Active"
+    Mitigated = "Mitigated"
+    Deleted = "Deleted"
 
-    type IntervalTree
-        bool dirty
-        int dirty_prefix
-        array<Block> sortedItems
-        array<float> sortedBottoms
-        array<float> suffixMaxHigh
-        array<Block> skipped
-        array<Block> mitigated
+type ActiveBlock
+    int left
+    float drawTop
+    float drawBottom
+    float middlePoint
+    float mitigationLevel
+    BlockState state
+    int fvgs
+    string labelText
+    box boxId
 
-    type Timeframe
-        string string
-        string label
-        int seconds
-        bool isCurrent
-        ActiveBlock[] blocks
+type Block
+    int left
+    float top
+    float bottom
+    float drawTop
+    float drawBottom
+    float mitigationLevel
+    BlockState state
+    int[] fvgs
+    bool skipped
 
-    type ParsedTimeframe
-        string string
-        int seconds
+type Cluster
+    float top
+    float bottom
+    ActiveBlock[] blocks
 
-    // VARS
-    // --------
-    var table stats = na
-    var int chartTfInSeconds = timeframe.in_seconds(timeframe.main_period)
-    var Timeframe[] timeframes = array.new<Timeframe>()
+type IntervalTree
+    bool dirty
+    int dirty_prefix
+    array<Block> sortedItems
+    array<float> sortedBottoms
+    array<float> suffixMaxHigh
+    array<Block> skipped
+    array<Block> mitigated
 
-    // FUNCTIONS
-    // ---------
+type Timeframe
+    string string
+    string label
+    int seconds
+    bool isCurrent
+    ActiveBlock[] blocks
 
-    initIntervalTree() =>
-        IntervalTree.new(
-            dirty         = true,
-            sortedItems   = array.new<Block>(),
-            sortedBottoms = array.new<float>(),
-            suffixMaxHigh = array.new<float>(),
-            skipped       = array.new<Block>(),
-            mitigated     = array.new<Block>()
-        )
+type ParsedTimeframe
+    string string
+    int seconds
 
-    method originalRange(Block self) =>
-        self.top - self.bottom
+// VARS
+// --------
+var table stats = na
+var int chartTfInSeconds = timeframe.in_seconds(timeframe.main_period)
+var Timeframe[] timeframes = array.new<Timeframe>()
 
-    method currentRange(Block self) =>
-        self.drawTop - self.drawBottom
+// FUNCTIONS
+// ---------
 
-    method size(IntervalTree self) =>
-        self.sortedItems.size()
+initIntervalTree() =>
+    IntervalTree.new(
+        dirty         = true,
+        sortedItems   = array.new<Block>(),
+        sortedBottoms = array.new<float>(),
+        suffixMaxHigh = array.new<float>(),
+        skipped       = array.new<Block>(),
+        mitigated     = array.new<Block>()
+    )
 
-    method add(IntervalTree self, Block block) =>    
-        pos = array.binary_search_rightmost(self.sortedBottoms, block.bottom)
-        self.sortedItems.insert(pos, block)
-        self.sortedBottoms.insert(pos, block.bottom)
-        self.suffixMaxHigh.insert(pos, 0.0)
-    
+method originalRange(Block self) =>
+    self.top - self.bottom
+
+method currentRange(Block self) =>
+    self.drawTop - self.drawBottom
+
+method size(IntervalTree self) =>
+    self.sortedItems.size()
+
+method add(IntervalTree self, Block block) =>    
+    pos = array.binary_search_rightmost(self.sortedBottoms, block.bottom)
+    self.sortedItems.insert(pos, block)
+    self.sortedBottoms.insert(pos, block.bottom)
+    self.suffixMaxHigh.insert(pos, 0.0)
+
+    if self.dirty
+        self.dirty_prefix := math.min(self.dirty_prefix, pos)
+    else
+        self.dirty_prefix := pos
+        self.dirty := true
+
+    self
+
+method remove(IntervalTree self, Block block) =>
+    pos = self.sortedItems.indexof(block)
+    if pos >= 0
+        self.sortedItems.remove(pos)
+        self.sortedBottoms.remove(pos)
+        self.suffixMaxHigh.remove(pos)
+
         if self.dirty
             self.dirty_prefix := math.min(self.dirty_prefix, pos)
         else
             self.dirty_prefix := pos
             self.dirty := true
 
-        self
+    self
 
-    method remove(IntervalTree self, Block block) =>
-        pos = self.sortedItems.indexof(block)
-        if pos >= 0
-            self.sortedItems.remove(pos)
-            self.sortedBottoms.remove(pos)
-            self.suffixMaxHigh.remove(pos)
+method items(IntervalTree self) =>
+    tmp = self.sortedItems.copy()
+    tmp.sort(order.ascending, "left")
+    tmp
 
-            if self.dirty
-                self.dirty_prefix := math.min(self.dirty_prefix, pos)
-            else
-                self.dirty_prefix := pos
-                self.dirty := true
+method allItems(IntervalTree self) => 
+    tmp = self.sortedItems.copy()
+    tmp.concat(self.mitigated)
+    tmp.sort(order.ascending, "left")
+    tmp
 
-        self
-
-    method items(IntervalTree self) =>
-        tmp = self.sortedItems.copy()
-        tmp.sort(order.ascending, "left")
-        tmp
-
-    method allItems(IntervalTree self) => 
-        tmp = self.sortedItems.copy()
-        tmp.concat(self.mitigated)
-        tmp.sort(order.ascending, "left")
-        tmp
-
-    method _rebuildSuffixMaxHigh(IntervalTree self) =>
-        n = self.size()
+method _rebuildSuffixMaxHigh(IntervalTree self) =>
+    n = self.size()
+    
+    if n > 1
+        int start_idx = self.dirty_prefix
+        if start_idx >= n
+            start_idx := 0
         
-        if n > 1
-            int start_idx = self.dirty_prefix
-            if start_idx >= n
-                start_idx := 0
-            
-            float running_max = -1
-            if start_idx == 0
-                running_max := self.sortedItems.get(0).top
-                self.suffixMaxHigh.set(0, running_max)
-                start_idx := 1
-            else
-                running_max := self.suffixMaxHigh.get(start_idx - 1)
-
-            for i = start_idx to n - 1
-                running_max := math.max(running_max, self.sortedItems.get(i).top)
-                self.suffixMaxHigh.set(i, running_max)
-        if n == 1
-            self.suffixMaxHigh.set(0, self.sortedItems.get(0).top)
-        
-        self.dirty := false
-
-    method query(IntervalTree self, float qlow, float qhigh) =>
-        result = array.new<Block>()
-        if self.dirty
-            _rebuildSuffixMaxHigh(self)
-
-        n = self.size()
-        if n > 0
-            candidateEnd=self.sortedBottoms.binary_search_rightmost(qhigh) - 1
-            if candidateEnd >= 0 and qlow <= self.suffixMaxHigh.get(candidateEnd) 
-                for i = 0 to candidateEnd
-                    it = self.sortedItems.get(i)
-                    if it.top >= qlow
-                        result.push(it)
-
-        // add skipped blocks to results
-        for block in self.skipped
-            if result.indexof(block) == -1
-                result.push(block)
-
-        self.skipped.clear()
-
-        result
-
-    canUseTF(int tfInSeconds) =>
-        bool result = true
-        if tfInSeconds < chartTfInSeconds and chartTfInSeconds/tfInSeconds > 800
-            result := false
-        result
-
-    parse(string tf) =>
-        int tfInSeconds = na
-
-        string validTf = str.match(tf, "^((\\d+[SHDWM])|(\\d+))$")
-        if validTf != ""
-            if str.match(tf, "^\\d+H$") != ""
-                h = str.tonumber(str.split(tf, "H").first())
-                if h <= 23 
-                    // 1h -> 60, 2h -> 120, 3h -> 180 etc.
-                    validTf := str.tostring(h*60)
-            
-            tfInSeconds := timeframe.in_seconds(validTf)
-
-        if tfInSeconds > 0
-            ParsedTimeframe.new(validTf, tfInSeconds)
+        float running_max = -1
+        if start_idx == 0
+            running_max := self.sortedItems.get(0).top
+            self.suffixMaxHigh.set(0, running_max)
+            start_idx := 1
         else
-            na
+            running_max := self.suffixMaxHigh.get(start_idx - 1)
 
-    init() =>
-        map<string, Timeframe> uniqueTimeframes = map.new<string, Timeframe>()
+        for i = start_idx to n - 1
+            running_max := math.max(running_max, self.sortedItems.get(i).top)
+            self.suffixMaxHigh.set(i, running_max)
+    if n == 1
+        self.suffixMaxHigh.set(0, self.sortedItems.get(0).top)
+    
+    self.dirty := false
 
-        string chartTfLabel = switch
-            (3600 <= chartTfInSeconds 
-                and chartTfInSeconds <= 82800 
-                and chartTfInSeconds % 3600 == 0) => str.format("{0}H", chartTfInSeconds / 3600)
-            => timeframe.main_period
+method query(IntervalTree self, float qlow, float qhigh) =>
+    result = array.new<Block>()
+    if self.dirty
+        _rebuildSuffixMaxHigh(self)
 
-        uniqueTimeframes.put(chartTfLabel, Timeframe.new(
-            string = timeframe.main_period,
-            label = chartTfLabel,
-            seconds = chartTfInSeconds,
-            isCurrent = true,
-            blocks = array.new<ActiveBlock>()
-        ))
+    n = self.size()
+    if n > 0
+        candidateEnd=self.sortedBottoms.binary_search_rightmost(qhigh) - 1
+        if candidateEnd >= 0 and qlow <= self.suffixMaxHigh.get(candidateEnd) 
+            for i = 0 to candidateEnd
+                it = self.sortedItems.get(i)
+                if it.top >= qlow
+                    result.push(it)
 
-        for userTf in str.split(timeframesInput, "\n")
-            string tf = str.trim(str.upper(userTf))
-            if uniqueTimeframes.contains(tf)
-                continue // ignore duplicate entries
+    // add skipped blocks to results
+    for block in self.skipped
+        if result.indexof(block) == -1
+            result.push(block)
+
+    self.skipped.clear()
+
+    result
+
+canUseTF(int tfInSeconds) =>
+    bool result = true
+    if tfInSeconds < chartTfInSeconds and chartTfInSeconds/tfInSeconds > 800
+        result := false
+    result
+
+parse(string tf) =>
+    int tfInSeconds = na
+
+    string validTf = str.match(tf, "^((\\d+[SHDWM])|(\\d+))$")
+    if validTf != ""
+        if str.match(tf, "^\\d+H$") != ""
+            h = str.tonumber(str.split(tf, "H").first())
+            if h <= 23 
+                // 1h -> 60, 2h -> 120, 3h -> 180 etc.
+                validTf := str.tostring(h*60)
         
-            parsedTf = parse(tf)
-            if not na(parsedTf)
-                uniqueTimeframes.put(tf, Timeframe.new(
-                    string = parsedTf.string,
-                    label = tf,
-                    seconds = parsedTf.seconds,
-                    isCurrent = false,
-                    blocks = array.new<ActiveBlock>()
-                ))
+        tfInSeconds := timeframe.in_seconds(validTf)
 
-        Timeframe[] allTimeframes = uniqueTimeframes.values()
-        allTimeframes.sort(order.ascending, "seconds")
-        
-        int currentTfIdx = -1
-        for [i, tf] in allTimeframes
-            if tf.isCurrent
-                currentTfIdx := i
-                break
+    if tfInSeconds > 0
+        ParsedTimeframe.new(validTf, tfInSeconds)
+    else
+        na
 
-        int timeframesCount = allTimeframes.size()-1
-        int tfIdxLowerBound = math.max(0, math.min(currentTfIdx - int(limitTfs/2), timeframesCount - limitTfs))
-        int tfIdxUpperBound = math.min(tfIdxLowerBound + limitTfs, timeframesCount)
-        
-        for i = tfIdxUpperBound to tfIdxLowerBound
-            tf = allTimeframes.get(i)
-            if canUseTF(tf.seconds)
-                timeframes.push(tf)
+init() =>
+    map<string, Timeframe> uniqueTimeframes = map.new<string, Timeframe>()
+
+    string chartTfLabel = switch
+        (3600 <= chartTfInSeconds 
+            and chartTfInSeconds <= 82800 
+            and chartTfInSeconds % 3600 == 0) => str.format("{0}H", chartTfInSeconds / 3600)
+        => timeframe.main_period
+
+    uniqueTimeframes.put(chartTfLabel, Timeframe.new(
+        string = timeframe.main_period,
+        label = chartTfLabel,
+        seconds = chartTfInSeconds,
+        isCurrent = true,
+        blocks = array.new<ActiveBlock>()
+    ))
+
+    for userTf in str.split(timeframesInput, "\n")
+        string tf = str.trim(str.upper(userTf))
+        if uniqueTimeframes.contains(tf)
+            continue // ignore duplicate entries
+    
+        parsedTf = parse(tf)
+        if not na(parsedTf)
+            uniqueTimeframes.put(tf, Timeframe.new(
+                string = parsedTf.string,
+                label = tf,
+                seconds = parsedTf.seconds,
+                isCurrent = false,
+                blocks = array.new<ActiveBlock>()
+            ))
+
+    Timeframe[] allTimeframes = uniqueTimeframes.values()
+    allTimeframes.sort(order.ascending, "seconds")
+    
+    int currentTfIdx = -1
+    for [i, tf] in allTimeframes
+        if tf.isCurrent
+            currentTfIdx := i
+            break
+
+    int timeframesCount = allTimeframes.size()-1
+    int tfIdxLowerBound = math.max(0, math.min(currentTfIdx - int(limitTfs/2), timeframesCount - limitTfs))
+    int tfIdxUpperBound = math.min(tfIdxLowerBound + limitTfs, timeframesCount)
+    
+    for i = tfIdxUpperBound to tfIdxLowerBound
+        tf = allTimeframes.get(i)
+        if canUseTF(tf.seconds)
+            timeframes.push(tf)
 
 
-    logic(IntervalTree tree) =>
-        // [bar0, bar1, bar2] = switch 
-        //     barstate.isrealtime => [1, 2, 3]
-        //     => [0, 1, 2]
+logic(IntervalTree tree) =>
+    // [bar0, bar1, bar2] = switch 
+    //     barstate.isrealtime => [1, 2, 3]
+    //     => [0, 1, 2]
 
-        const int bar0 = 0
-        const int bar1 = 1
-        const int bar2 = 2
+    const int bar0 = 0
+    const int bar1 = 1
+    const int bar2 = 2
 
-        float top1 = math.max(open[bar1], close[bar1])
-        float top0 = math.max(open[bar0], close[bar0])
-        float bottom1 = math.min(open[bar1], close[bar1])
-        float bottom0 = math.min(open[bar0], close[bar0])
-        bool fvgBull = use3BarsFVGOnly ? low[bar0] > high[bar2] : false
-        bool fvgBear = use3BarsFVGOnly ? high[bar0] < low[bar2] : false
-        float fvgTop = fvgBull ? low[bar0] : fvgBear ? low[bar2] : na
-        float fvgBottom = fvgBull ? high[bar2] : fvgBear ? high[bar0] : na 
+    float top1 = math.max(open[bar1], close[bar1])
+    float top0 = math.max(open[bar0], close[bar0])
+    float bottom1 = math.min(open[bar1], close[bar1])
+    float bottom0 = math.min(open[bar0], close[bar0])
+    bool fvgBull = use3BarsFVGOnly ? low[bar0] > high[bar2] : false
+    bool fvgBear = use3BarsFVGOnly ? high[bar0] < low[bar2] : false
+    float fvgTop = fvgBull ? low[bar0] : fvgBear ? low[bar2] : na
+    float fvgBottom = fvgBull ? high[bar2] : fvgBear ? high[bar0] : na 
 
-        tree.mitigated.clear()
-        result = tree.query(low[bar0], high[bar0])
+    tree.mitigated.clear()
+    result = tree.query(low[bar0], high[bar0])
 
-        for block in result 
-            if block.skipped
-                block.skipped := false
-                if use3BarsFVGOnly
-                    if (fvgBear or fvgBull)
-                        fvgOverlap = math.max(0, math.min(block.drawTop, fvgTop) - math.max(block.drawBottom, fvgBottom)) / block.currentRange() * 100
-                        if fvgOverlap < fvgOverlapTreshold
-                            tree.remove(block)
-                            block.state := BlockState.Mitigated
-                            block.mitigationLevel := 100
-                            tree.mitigated.push(block)
-                    else
+    for block in result 
+        if block.skipped
+            block.skipped := false
+            if use3BarsFVGOnly
+                if (fvgBear or fvgBull)
+                    fvgOverlap = math.max(0, math.min(block.drawTop, fvgTop) - math.max(block.drawBottom, fvgBottom)) / block.currentRange() * 100
+                    if fvgOverlap < fvgOverlapTreshold
                         tree.remove(block)
                         block.state := BlockState.Mitigated
                         block.mitigationLevel := 100
                         tree.mitigated.push(block)
-
-            if block.left >= time[bar1]
-                continue
-
-            float overlap = math.max(0, math.min(block.drawTop, high) - math.max(block.drawBottom, low)) / block.currentRange() * 100
-            if (100 - mitigationLevelLimit) < overlap
-                float bodyOverlap = math.max(0, math.min(block.drawTop, top0)-math.max(block.drawBottom, bottom0)) / block.currentRange() * 100
-                if bodyOverlap > fvgOverlapTreshold
-                    block.skipped := true
-                    tree.skipped.push(block)
-                    if (block.fvgs.size() > 0 and block.fvgs.last() < time[bar0]) or block.fvgs.size() == 0
-                        block.fvgs.push(time[bar0])
-                    continue
-
-            if overlap > 0
-                drawTop = block.drawTop
-                if block.drawTop <= high
-                    drawTop := low
-
-                drawBottom = block.drawBottom          
-                if low <= block.drawBottom
-                    drawBottom := high
-
-                if drawBottom < drawTop
-                    block.drawTop := drawTop
-                    block.drawBottom := drawBottom
-                    block.mitigationLevel := (1 - (block.currentRange() / block.originalRange())) * 100
-
-                    if block.mitigationLevel > mitigationLevelLimit
-                        tree.remove(block)
-                        block.state := BlockState.Mitigated
-                        tree.mitigated.push(block)
                 else
                     tree.remove(block)
-                    block.mitigationLevel := 100
                     block.state := BlockState.Mitigated
+                    block.mitigationLevel := 100
                     tree.mitigated.push(block)
 
-        // block detection
-        bool diff = (open[bar1] != close[bar1] and open[bar0] != close[bar0]) and ((open[bar0] < close[bar0]) != (open[bar1] < close[bar1]))
-        if diff
-            float top = math.min(top1, top0)
-            float bottom = math.max(bottom1, bottom0)
-            float height = top - bottom
-
-            Block newBlock = Block.new(
-                left = time[bar1],
-                top = top,
-                bottom = bottom,
-                drawTop = top,
-                drawBottom = bottom,
-                mitigationLevel = 0.0,
-                fvgs = array.new<int>(),
-                skipped = false,
-                state = BlockState.New
-            )
-
-            if tree.size() > 0
-                Block block = tree.items().last()
-                block.state := BlockState.Active
-                if block.left == time[bar2]
-                    float overlap = math.max(0, math.min(block.drawTop, top)-math.max(block.drawBottom, bottom)) / block.originalRange()
-                    
-                    blockRange = block.currentRange()
-                    newBlockRange = newBlock.currentRange()
-
-                    denom = math.max(blockRange, newBlockRange)
-                    relativeDiff = math.abs(blockRange - newBlockRange) / denom
-                    similarity = 1.0 / (1.0 +  relativeDiff)
-
-                    if overlap > 0.80 and similarity > 0.8
-                        tree.remove(block)
-
-            
-            tree.add(newBlock)
-
-            if tree.size() > 500
-                tree.remove(tree.items().first())
-
-
-    security_logic() =>
-        var tree = initIntervalTree()
-        tf_seconds = timeframe.in_seconds()
-        // Chart TF and any TF 12h+ is always loaded/calculated
-        // 12h - 6h - loaded/calculated only for the last 365 days
-        // anything below 6h - loaded/calculated only for the last 30 days
-        can_run = switch
-            tf_seconds == chartTfInSeconds => true
-            43200 <= tf_seconds => true
-            21600 <= tf_seconds and time >= MTF_TIME_LIMIT => true
-            time >= LTF_TIME_LIMIT => true
-            => false
-        
-        if can_run
-            logic(tree)
-
-        if barstate.islast or barstate.islastconfirmedhistory
-            tree.allItems()
-        else
-            na
-
-
-    if barstate.isfirst
-        init()
-
-    for tf in timeframes
-        new_blocks = switch
-            tf.isCurrent => security_logic()
-            => request.security(
-                symbol = syminfo.tickerid,
-                timeframe = tf.string,
-                expression = security_logic(),
-                gaps = barmerge.gaps_off,
-                lookahead = barmerge.lookahead_off,
-                ignore_invalid_symbol = true
-            )
-
-        if na(new_blocks)
+        if block.left >= time[bar1]
             continue
 
-        int i = 0
-        int j = 0
-        blocksCount = tf.blocks.size()
-        newBlocksCount = new_blocks.size()
-        
-        while i < blocksCount and j < newBlocksCount
-            block = tf.blocks.get(i)
-            new_block = new_blocks.get(j)
+        float overlap = math.max(0, math.min(block.drawTop, high) - math.max(block.drawBottom, low)) / block.currentRange() * 100
+        if (100 - mitigationLevelLimit) < overlap
+            float bodyOverlap = math.max(0, math.min(block.drawTop, top0)-math.max(block.drawBottom, bottom0)) / block.currentRange() * 100
+            if bodyOverlap > fvgOverlapTreshold
+                block.skipped := true
+                tree.skipped.push(block)
+                if (block.fvgs.size() > 0 and block.fvgs.last() < time[bar0]) or block.fvgs.size() == 0
+                    block.fvgs.push(time[bar0])
+                continue
 
-            if block.left == new_block.left
-                i += 1
-                j += 1
+        if overlap > 0
+            drawTop = block.drawTop
+            if block.drawTop <= high
+                drawTop := low
 
-                block.drawTop := new_block.drawTop
-                block.drawBottom := new_block.drawBottom
-                block.mitigationLevel := new_block.mitigationLevel
-                block.middlePoint := block.drawBottom + block.drawTop / 2
-                block.fvgs := new_block.fvgs.size()
-                block.state := new_block.state
-            else if block.left < new_block.left
-                block.state := BlockState.Deleted
-                i += 1
+            drawBottom = block.drawBottom          
+            if low <= block.drawBottom
+                drawBottom := high
+
+            if drawBottom < drawTop
+                block.drawTop := drawTop
+                block.drawBottom := drawBottom
+                block.mitigationLevel := (1 - (block.currentRange() / block.originalRange())) * 100
+
+                if block.mitigationLevel > mitigationLevelLimit
+                    tree.remove(block)
+                    block.state := BlockState.Mitigated
+                    tree.mitigated.push(block)
             else
-                tf.blocks.push(ActiveBlock.new(
-                    left = new_block.left,
-                    drawTop = new_block.drawTop,
-                    drawBottom = new_block.drawBottom,
-                    mitigationLevel = new_block.mitigationLevel,
-                    middlePoint = new_block.drawBottom + new_block.drawTop / 2,
-                    fvgs = new_block.fvgs.size(),
-                    state = new_block.state
-                ))
-                j += 1
+                tree.remove(block)
+                block.mitigationLevel := 100
+                block.state := BlockState.Mitigated
+                tree.mitigated.push(block)
+
+    // block detection
+    bool diff = (open[bar1] != close[bar1] and open[bar0] != close[bar0]) and ((open[bar0] < close[bar0]) != (open[bar1] < close[bar1]))
+    if diff
+        float top = math.min(top1, top0)
+        float bottom = math.max(bottom1, bottom0)
+        float height = top - bottom
+
+        Block newBlock = Block.new(
+            left = time[bar1],
+            top = top,
+            bottom = bottom,
+            drawTop = top,
+            drawBottom = bottom,
+            mitigationLevel = 0.0,
+            fvgs = array.new<int>(),
+            skipped = false,
+            state = BlockState.New
+        )
+
+        if tree.size() > 0
+            Block block = tree.items().last()
+            block.state := BlockState.Active
+            if block.left == time[bar2]
+                float overlap = math.max(0, math.min(block.drawTop, top)-math.max(block.drawBottom, bottom)) / block.originalRange()
+                
+                blockRange = block.currentRange()
+                newBlockRange = newBlock.currentRange()
+
+                denom = math.max(blockRange, newBlockRange)
+                relativeDiff = math.abs(blockRange - newBlockRange) / denom
+                similarity = 1.0 / (1.0 +  relativeDiff)
+
+                if overlap > 0.80 and similarity > 0.8
+                    tree.remove(block)
+
         
-        while i < blocksCount
-            block = tf.blocks.get(i)
+        tree.add(newBlock)
+
+        if tree.size() > 500
+            tree.remove(tree.items().first())
+
+
+security_logic() =>
+    var tree = initIntervalTree()
+    tf_seconds = timeframe.in_seconds()
+    // Chart TF and any TF 12h+ is always loaded/calculated
+    // 12h - 6h - loaded/calculated only for the last 365 days
+    // anything below 6h - loaded/calculated only for the last 30 days
+    can_run = switch
+        tf_seconds == chartTfInSeconds => true
+        43200 <= tf_seconds => true
+        21600 <= tf_seconds and time >= MTF_TIME_LIMIT => true
+        time >= LTF_TIME_LIMIT => true
+        => false
+    
+    if can_run
+        logic(tree)
+
+    if barstate.islast or barstate.islastconfirmedhistory
+        tree.allItems()
+    else
+        na
+
+
+if barstate.isfirst
+    init()
+
+for tf in timeframes
+    new_blocks = switch
+        tf.isCurrent => security_logic()
+        => request.security(
+            symbol = syminfo.tickerid,
+            timeframe = tf.string,
+            expression = security_logic(),
+            gaps = barmerge.gaps_off,
+            lookahead = barmerge.lookahead_off,
+            ignore_invalid_symbol = true
+        )
+
+    if na(new_blocks)
+        continue
+
+    int i = 0
+    int j = 0
+    blocksCount = tf.blocks.size()
+    newBlocksCount = new_blocks.size()
+    
+    while i < blocksCount and j < newBlocksCount
+        block = tf.blocks.get(i)
+        new_block = new_blocks.get(j)
+
+        if block.left == new_block.left
+            i += 1
+            j += 1
+
+            block.drawTop := new_block.drawTop
+            block.drawBottom := new_block.drawBottom
+            block.mitigationLevel := new_block.mitigationLevel
+            block.middlePoint := block.drawBottom + block.drawTop / 2
+            block.fvgs := new_block.fvgs.size()
+            block.state := new_block.state
+        else if block.left < new_block.left
             block.state := BlockState.Deleted
             i += 1
-        
-        while j < newBlocksCount
-            new_block = new_blocks.get(j)
+        else
             tf.blocks.push(ActiveBlock.new(
                 left = new_block.left,
                 drawTop = new_block.drawTop,
                 drawBottom = new_block.drawBottom,
                 mitigationLevel = new_block.mitigationLevel,
+                middlePoint = new_block.drawBottom + new_block.drawTop / 2,
                 fvgs = new_block.fvgs.size(),
                 state = new_block.state
             ))
             j += 1
+    
+    while i < blocksCount
+        block = tf.blocks.get(i)
+        block.state := BlockState.Deleted
+        i += 1
+    
+    while j < newBlocksCount
+        new_block = new_blocks.get(j)
+        tf.blocks.push(ActiveBlock.new(
+            left = new_block.left,
+            drawTop = new_block.drawTop,
+            drawBottom = new_block.drawBottom,
+            mitigationLevel = new_block.mitigationLevel,
+            fvgs = new_block.fvgs.size(),
+            state = new_block.state
+        ))
+        j += 1
+    
+    tf.blocks.sort(order.ascending, "left")
+    if tf.blocks.size() > 0
+        for k = tf.blocks.size() - 1 to 0
+            block = tf.blocks.get(k)
+            if block.state == BlockState.Deleted or (not hideMitigated and block.state == BlockState.Mitigated)
+                tf.blocks.remove(k)
+                if not na(block.boxId)
+                    block.boxId.delete()
+
+
+if barstate.islast
+    right = time + timeframe.in_seconds() * 10 * 1000
+    boxCount = box.all.size()
+    
+    dbgMsg = ""
+
+    for tf in timeframes
+        dbgMsg += str.format("\n[{0}] {1}", tf.label, tf.blocks.size())
         
-        tf.blocks.sort(order.ascending, "left")
-        if tf.blocks.size() > 0
-            for k = tf.blocks.size() - 1 to 0
-                block = tf.blocks.get(k)
-                if block.state == BlockState.Deleted or (not hideMitigated and block.state == BlockState.Mitigated)
-                    tf.blocks.remove(k)
-                    if not na(block.boxId)
-                        block.boxId.delete()
+        for block in tf.blocks
+            block.labelText := str.format("{0}{1} x{2} ({3,number,##.##}%)", 
+                block.state == BlockState.New or block.state == BlockState.Active ? "" : "*", 
+                tf.label, 
+                block.fvgs, 
+                block.mitigationLevel
+            )
 
-
-    if barstate.islast
-        right = time + timeframe.in_seconds() * 10 * 1000
-        boxCount = box.all.size()
-        
-        dbgMsg = ""
-
-        for tf in timeframes
-            dbgMsg += str.format("\n[{0}] {1}", tf.label, tf.blocks.size())
+            if hideMitigated and block.state == BlockState.Mitigated
+                continue
             
+            if na(block.boxId)
+                if block.state == BlockState.Mitigated or (hiddenDepth <= block.fvgs) and boxCount < 500
+                    col = switch block.state
+                        BlockState.New => color.rgb(76, 175, 79, 84)
+                        BlockState.Active =>  blockBackground
+                        BlockState.Mitigated => color.rgb(247, 176, 54, 91)
+                        BlockState.Deleted => color.rgb(255, 82, 82, 84)
+                    boxCount += 1
+                    boxId = box.new(
+                        left = block.left,
+                        top = block.drawTop,
+                        right = right,
+                        bottom = block.drawBottom,
+                        xloc = xloc.bar_time,
+                        bgcolor = col,
+                        border_color = blockBorder,
+                        text_color = blockTextColor,
+                        text_size = size.tiny,
+                        text_valign = text.align_center,
+                        text_halign = text.align_right,
+                        text_font_family = font.family_default,
+                        text = block.labelText
+                    )
+                    block.boxId := boxId
+            else
+                block.boxId.set_top(block.drawTop)
+                block.boxId.set_bottom(block.drawBottom)
+                block.boxId.set_right(right)
+                block.boxId.set_text(block.labelText)
+    
+    if dbgMode
+        log.info(dbgMsg)
+
+    if clusterLabels
+        clusters = array.new<Cluster>()
+        for tf in timeframes                
             for block in tf.blocks
-                block.labelText := str.format("{0}{1} x{2} ({3,number,##.##}%)", 
-                    block.state == BlockState.New or block.state == BlockState.Active ? "" : "*", 
-                    tf.label, 
-                    block.fvgs, 
-                    block.mitigationLevel
-                )
-
-                if hideMitigated and block.state == BlockState.Mitigated
-                    continue
-                
                 if na(block.boxId)
-                    if block.state == BlockState.Mitigated or (hiddenDepth <= block.fvgs) and boxCount < 500
-                        col = switch block.state
-                            BlockState.New => color.rgb(76, 175, 79, 84)
-                            BlockState.Active =>  blockBackground
-                            BlockState.Mitigated => color.rgb(247, 176, 54, 91)
-                            BlockState.Deleted => color.rgb(255, 82, 82, 84)
-                        boxCount += 1
-                        boxId = box.new(
-                            left = block.left,
-                            top = block.drawTop,
-                            right = right,
-                            bottom = block.drawBottom,
-                            xloc = xloc.bar_time,
-                            bgcolor = col,
-                            border_color = blockBorder,
-                            text_color = blockTextColor,
-                            text_size = size.tiny,
-                            text_valign = text.align_center,
-                            text_halign = text.align_right,
-                            text_font_family = font.family_default,
-                            text = block.labelText
-                        )
-                        block.boxId := boxId
-                else
-                    block.boxId.set_top(block.drawTop)
-                    block.boxId.set_bottom(block.drawBottom)
-                    block.boxId.set_right(right)
-                    block.boxId.set_text(block.labelText)
-        
-        if dbgMode
-            log.info(dbgMsg)
+                    continue
 
-        if clusterLabels
-            clusters = array.new<Cluster>()
-            for tf in timeframes                
-                for block in tf.blocks
-                    if na(block.boxId)
-                        continue
+                Cluster matchingCluster = na
+                for cluster in clusters
+                    float overlap = math.max(0, math.min(block.drawTop, cluster.top) - math.max(block.drawBottom, cluster.bottom)) / (cluster.top - cluster.bottom)
+                    if overlap > 0
+                        matchingCluster:=cluster
+                        break
+                
+                if na(matchingCluster)
+                    matchingCluster:= Cluster.new(
+                        top = block.drawTop,
+                        bottom = block.drawBottom,
+                        blocks = array.new<ActiveBlock>()
+                    )
+                    clusters.push(matchingCluster)
 
-                    Cluster matchingCluster = na
-                    for cluster in clusters
-                        float overlap = math.max(0, math.min(block.drawTop, cluster.top) - math.max(block.drawBottom, cluster.bottom)) / (cluster.top - cluster.bottom)
-                        if overlap > 0
-                            matchingCluster:=cluster
-                            break
-                    
-                    if na(matchingCluster)
-                        matchingCluster:= Cluster.new(
-                            top = block.drawTop,
-                            bottom = block.drawBottom,
-                            blocks = array.new<ActiveBlock>()
-                        )
-                        clusters.push(matchingCluster)
+                matchingCluster.blocks.push(block)
+                matchingCluster.top := math.max(matchingCluster.top, block.drawTop) * (1+clusterMargin)
+                matchingCluster.bottom := math.min(matchingCluster.bottom, block.drawBottom) * (1-clusterMargin)
 
-                    matchingCluster.blocks.push(block)
-                    matchingCluster.top := math.max(matchingCluster.top, block.drawTop) * (1+clusterMargin)
-                    matchingCluster.bottom := math.min(matchingCluster.bottom, block.drawBottom) * (1-clusterMargin)
-
-            for cluster in clusters 
-                lbls = array.new<string>()
-                for block in cluster.blocks
-                    block.boxId.set_text("")
-                    if lbls.size() > 0
-                        if lbls.last() != block.labelText
-                            lbls.push(block.labelText)
-                    else
+        for cluster in clusters 
+            lbls = array.new<string>()
+            for block in cluster.blocks
+                block.boxId.set_text("")
+                if lbls.size() > 0
+                    if lbls.last() != block.labelText
                         lbls.push(block.labelText)
+                else
+                    lbls.push(block.labelText)
 
-                cluster.blocks.sort(order.descending, "middlePoint")
-                clusterBoxId = cluster.blocks.get(cluster.blocks.size() /2).boxId
-                clusterBoxId.set_text(lbls.join(" | "))
+            cluster.blocks.sort(order.descending, "middlePoint")
+            clusterBoxId = cluster.blocks.get(cluster.blocks.size() /2).boxId
+            clusterBoxId.set_text(lbls.join(" | "))
 
-            if dbgMode
-                log.info("\nClusters: {0}\nBoxes: {1}", clusters.size(), box.all.size())
+        if dbgMode
+            log.info("\nClusters: {0}\nBoxes: {1}", clusters.size(), box.all.size())
